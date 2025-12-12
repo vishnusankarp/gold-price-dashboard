@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from datetime import timedelta
 
 # --- PAGE CONFIGURATION ---
@@ -20,31 +19,26 @@ def load_data():
     # Fetch 5 years of data
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
     
-    # DOWNLOAD FIX: Force simple structure
+    # Force simple structure from yfinance
     raw_data = yf.download(list(tickers.values()), start=start_date, progress=False)
     
-    # 1. Handle "MultiIndex" (The most common error source)
-    # yfinance often returns columns like: ('Adj Close', 'GC=F')
+    # Handle "MultiIndex" (flatten columns if they are nested)
     if isinstance(raw_data.columns, pd.MultiIndex):
         try:
-            # Try to grab just the 'Adj Close' level
             raw_data = raw_data.xs('Adj Close', axis=1, level=0, drop_level=True)
         except KeyError:
-            # Fallback if 'Adj Close' is missing, try 'Close'
             raw_data = raw_data.xs('Close', axis=1, level=0, drop_level=True)
 
-    # 2. Rename columns
-    # Invert the dictionary to map 'GC=F' -> 'Gold'
+    # Rename columns
     symbol_to_name = {v: k for k, v in tickers.items()}
     df = raw_data.rename(columns=symbol_to_name)
     
-    # 3. Validation Check
-    # If 'Gold' is still missing, it means the download failed silently
+    # Validation Check
     if 'Gold' not in df.columns:
-        st.error("⚠️ Data Error: Yahoo Finance returned data, but the 'Gold' column is missing. This is usually a temporary API issue.")
+        st.error("⚠️ Data Error: 'Gold' column missing. Yahoo Finance might be blocking requests.")
         st.stop()
 
-    # Clean data
+    # Clean data (Forward fill to handle holidays)
     df = df.fillna(method='ffill').dropna()
     
     if '10Y_Treasury' in df.columns:
@@ -52,7 +46,7 @@ def load_data():
         
     return df
 
-# --- 2. FEATURE ENGINEERING ---
+# --- 2. FEATURE ENGINEERING (Fixed: No Dropna) ---
 def add_features(df):
     df = df.copy()
     # RSI
@@ -71,22 +65,23 @@ def add_features(df):
     df['Corr_USD'] = df['Gold'].rolling(60).corr(df['USD_Index'])
     df['Corr_Yield'] = df['Gold'].rolling(60).corr(df['10Y_Treasury'])
     
-    # Target: Log Returns (Stationary)
+    # Target: Log Returns (Shifted 30 days into future)
+    # Note: The last 30 rows will have NaN targets. We KEEP them for the display.
     df['Log_Return_30d'] = np.log(df['Gold']).shift(-30) - np.log(df['Gold'])
     
-    return df.dropna()
+    return df  # <--- FIX: We return the full dataframe (including today's rows)
 
-# --- 3. MODEL TRAINING ---
+# --- 3. MODEL TRAINING (Fixed: Filter NaNs internally) ---
 @st.cache_resource
 def train_model(data):
     features = ['RSI', 'SMA_50', 'SMA_200', 'Rolling_Std', 'Corr_USD', 'Corr_Yield', 'USD_Index', '10Y_Treasury']
     target = 'Log_Return_30d'
     
-    # Train on all available data except the last 30 days (where target is NaN)
-    train_data = data.dropna(subset=[target])
+    # Separate Training Data: Drop rows where we don't know the future yet
+    train_df = data.dropna(subset=[target, *features])
     
-    X = train_data[features]
-    y = train_data[target]
+    X = train_df[features]
+    y = train_df[target]
     
     model = xgb.XGBRegressor(n_estimators=500, learning_rate=0.01, max_depth=4, random_state=42)
     model.fit(X, y)
@@ -100,17 +95,22 @@ st.markdown("### Strategic Inventory Planning | 30-Day Horizon")
 # Load & Process
 with st.spinner('Fetching live market data...'):
     df_raw = load_data()
-    df = add_features(df_raw)
+    df = add_features(df_raw) 
+    
+    # Train model (it will filter NaNs internally)
     model, feature_list = train_model(df)
 
-# Prediction Logic
+# Prediction Logic: Use the ACTUAL last row (Today)
+# Even though 'Log_Return_30d' is NaN for this row, the FEATURES (Price, RSI) are valid.
 last_row = df.iloc[-1]
 current_price = last_row['Gold']
 current_date = df.index[-1]
 
-# Predict
+# Predict future return based on today's features
 latest_features = df[feature_list].iloc[[-1]]
 pred_log_return = model.predict(latest_features)[0]
+
+# Calculate Prices
 predicted_price = current_price * np.exp(pred_log_return)
 pct_change = (predicted_price - current_price) / current_price
 
@@ -143,13 +143,13 @@ tab1, tab2 = st.tabs(["Price Forecast", "Macro Drivers"])
 
 with tab1:
     st.subheader("Price Trend Analysis")
-    # Interactive Plotly Chart
     fig = go.Figure()
+    
     # Plot last 1 year of actual data
     subset = df.tail(365)
     fig.add_trace(go.Scatter(x=subset.index, y=subset['Gold'], mode='lines', name='Actual Price', line=dict(color='black')))
     
-    # Plot Projection Line (Connecting today to +30 days)
+    # Plot Projection Line
     future_date = current_date + timedelta(days=30)
     fig.add_trace(go.Scatter(
         x=[current_date, future_date], 
@@ -163,7 +163,6 @@ with tab1:
 
 with tab2:
     st.subheader("What is driving this prediction?")
-    # Feature Importance
     importance = pd.DataFrame({'Feature': feature_list, 'Importance': model.feature_importances_})
     importance = importance.sort_values(by='Importance', ascending=True)
     
@@ -174,7 +173,6 @@ with tab2:
     fig_imp.update_layout(height=400, title="Model Feature Importance", template="simple_white")
     st.plotly_chart(fig_imp, use_container_width=True)
 
-    # Correlation check
     st.info(f"Current Gold/USD Correlation (60d rolling): **{last_row['Corr_USD']:.2f}**")
 
 # --- SIDEBAR: SIMULATION ---
