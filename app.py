@@ -10,9 +10,7 @@ from datetime import timedelta
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gold Price Intelligence", layout="wide", page_icon="🏆")
 
-# --- 1. DATA INGESTION (Cached for Speed) ---
-@st.cache_data
-# --- 1. DATA INGESTION (Cached for Speed) ---
+# --- 1. DATA INGESTION (Robust Version) ---
 @st.cache_data
 def load_data():
     tickers = {
@@ -22,33 +20,35 @@ def load_data():
     # Fetch 5 years of data
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
     
-    # DOWNLOAD FIX: Force 'Adj Close' and flatten structure
+    # DOWNLOAD FIX: Force simple structure
     raw_data = yf.download(list(tickers.values()), start=start_date, progress=False)
     
-    # Handle MultiIndex (yfinance often returns columns like ('Adj Close', 'GC=F'))
+    # 1. Handle "MultiIndex" (The most common error source)
+    # yfinance often returns columns like: ('Adj Close', 'GC=F')
     if isinstance(raw_data.columns, pd.MultiIndex):
         try:
-            # Try to grab just the Adjusted Close prices
-            raw_data = raw_data['Adj Close']
+            # Try to grab just the 'Adj Close' level
+            raw_data = raw_data.xs('Adj Close', axis=1, level=0, drop_level=True)
         except KeyError:
-            # Fallback to standard Close if Adj Close is missing
-            raw_data = raw_data['Close']
-            
-    # Rename columns using the mapping
-    # We invert the dictionary to map 'GC=F' -> 'Gold'
+            # Fallback if 'Adj Close' is missing, try 'Close'
+            raw_data = raw_data.xs('Close', axis=1, level=0, drop_level=True)
+
+    # 2. Rename columns
+    # Invert the dictionary to map 'GC=F' -> 'Gold'
     symbol_to_name = {v: k for k, v in tickers.items()}
     df = raw_data.rename(columns=symbol_to_name)
     
-    # DEBUG: Ensure 'Gold' exists. If not, the download failed.
+    # 3. Validation Check
+    # If 'Gold' is still missing, it means the download failed silently
     if 'Gold' not in df.columns:
-        st.error("⚠️ Data Download Error: Could not fetch Gold prices. Yahoo Finance might be blocking the request.")
+        st.error("⚠️ Data Error: Yahoo Finance returned data, but the 'Gold' column is missing. This is usually a temporary API issue.")
         st.stop()
-        
+
     # Clean data
     df = df.fillna(method='ffill').dropna()
     
     if '10Y_Treasury' in df.columns:
-        df['10Y_Treasury'] = df['10Y_Treasury'] / 10  # Normalize yield
+        df['10Y_Treasury'] = df['10Y_Treasury'] / 10
         
     return df
 
