@@ -12,6 +12,8 @@ st.set_page_config(page_title="Gold Price Intelligence", layout="wide", page_ico
 
 # --- 1. DATA INGESTION (Cached for Speed) ---
 @st.cache_data
+# --- 1. DATA INGESTION (Cached for Speed) ---
+@st.cache_data
 def load_data():
     tickers = {
         'Gold': 'GC=F', 'USD_Index': 'DX-Y.NYB', 
@@ -19,11 +21,31 @@ def load_data():
     }
     # Fetch 5 years of data
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
-    raw_data = yf.download(list(tickers.values()), start=start_date, progress=False)['Adj Close']
     
-    # Rename and Clean
+    # DOWNLOAD FIX: Force 'Adj Close' and flatten structure
+    raw_data = yf.download(list(tickers.values()), start=start_date, progress=False)
+    
+    # Handle MultiIndex (yfinance often returns columns like ('Adj Close', 'GC=F'))
+    if isinstance(raw_data.columns, pd.MultiIndex):
+        try:
+            # Try to grab just the Adjusted Close prices
+            raw_data = raw_data['Adj Close']
+        except KeyError:
+            # Fallback to standard Close if Adj Close is missing
+            raw_data = raw_data['Close']
+            
+    # Rename columns using the mapping
+    # We invert the dictionary to map 'GC=F' -> 'Gold'
     symbol_to_name = {v: k for k, v in tickers.items()}
-    df = raw_data.rename(columns=symbol_to_name).fillna(method='ffill').dropna()
+    df = raw_data.rename(columns=symbol_to_name)
+    
+    # DEBUG: Ensure 'Gold' exists. If not, the download failed.
+    if 'Gold' not in df.columns:
+        st.error("⚠️ Data Download Error: Could not fetch Gold prices. Yahoo Finance might be blocking the request.")
+        st.stop()
+        
+    # Clean data
+    df = df.fillna(method='ffill').dropna()
     
     if '10Y_Treasury' in df.columns:
         df['10Y_Treasury'] = df['10Y_Treasury'] / 10  # Normalize yield
