@@ -4,25 +4,34 @@ import pandas as pd
 import numpy as np
 import xgboost as xgb
 import plotly.graph_objects as go
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Gold Price Intelligence", layout="wide", page_icon="🏆")
+st.set_page_config(
+    page_title="Gold Price Intelligence (UK)", 
+    layout="wide", 
+    page_icon="🇬🇧"
+)
 
-# --- 1. DATA INGESTION (Robust Version) ---
-@st.cache_data
+# --- 1. DATA INGESTION (Auto-Updates Every 2 Hours) ---
+# ttl="2h" forces the app to re-download data if the cache is older than 2 hours
+@st.cache_data(ttl="2h")
 def load_data():
     tickers = {
-        'Gold': 'GC=F', 'USD_Index': 'DX-Y.NYB', 
-        '10Y_Treasury': '^TNX', 'VIX': '^VIX', 'SP500': '^GSPC'
+        'Gold_USD': 'GC=F',       # Gold Futures (Global Standard)
+        'GBP_USD': 'GBPUSD=X',    # Exchange Rate (£1 = $x)
+        'USD_Index': 'DX-Y.NYB',  # Strength of Dollar
+        '10Y_Treasury': '^TNX',   # Opportunity Cost
+        'VIX': '^VIX'             # Market Fear
     }
+    
     # Fetch 5 years of data
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
     
-    # Force simple structure from yfinance
+    # Download data
     raw_data = yf.download(list(tickers.values()), start=start_date, progress=False)
     
-    # Handle "MultiIndex" (flatten columns if they are nested)
+    # Flatten MultiIndex (Fix for yfinance structure)
     if isinstance(raw_data.columns, pd.MultiIndex):
         try:
             raw_data = raw_data.xs('Adj Close', axis=1, level=0, drop_level=True)
@@ -34,50 +43,57 @@ def load_data():
     df = raw_data.rename(columns=symbol_to_name)
     
     # Validation Check
-    if 'Gold' not in df.columns:
-        st.error("⚠️ Data Error: 'Gold' column missing. Yahoo Finance might be blocking requests.")
+    if 'Gold_USD' not in df.columns or 'GBP_USD' not in df.columns:
+        st.error("⚠️ Data Error: Yahoo Finance could not retrieve Gold or Currency data.")
         st.stop()
 
-    # Clean data (Forward fill to handle holidays)
+    # Clean data (Forward fill helps with holidays)
     df = df.fillna(method='ffill').dropna()
+    
+    # --- 🇬🇧 CRITICAL CALCULATION ---
+    # Convert Global Gold Price ($) to UK Price (£)
+    df['Gold_GBP'] = df['Gold_USD'] / df['GBP_USD']
     
     if '10Y_Treasury' in df.columns:
         df['10Y_Treasury'] = df['10Y_Treasury'] / 10
         
     return df
 
-# --- 2. FEATURE ENGINEERING (Fixed: No Dropna) ---
+# --- 2. FEATURE ENGINEERING ---
 def add_features(df):
     df = df.copy()
-    # RSI
-    delta = df['Gold'].diff()
+    
+    # All technicals are calculated on the POUND PRICE
+    # This ensures the model predicts the trend relevant to UK buyers
+    
+    # RSI (Momentum)
+    delta = df['Gold_GBP'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Moving Averages & Bands
-    df['SMA_50'] = df['Gold'].rolling(50).mean()
-    df['SMA_200'] = df['Gold'].rolling(200).mean()
-    df['Rolling_Std'] = df['Gold'].rolling(20).std()
+    # Moving Averages
+    df['SMA_50'] = df['Gold_GBP'].rolling(50).mean()
+    df['SMA_200'] = df['Gold_GBP'].rolling(200).mean()
+    df['Rolling_Std'] = df['Gold_GBP'].rolling(20).std()
     
-    # Dynamic Macro Correlations
-    df['Corr_USD'] = df['Gold'].rolling(60).corr(df['USD_Index'])
-    df['Corr_Yield'] = df['Gold'].rolling(60).corr(df['10Y_Treasury'])
+    # Correlations (Does the Pound drop make Gold jump?)
+    df['Corr_GBP'] = df['Gold_GBP'].rolling(60).corr(df['GBP_USD'])
     
-    # Target: Log Returns (Shifted 30 days into future)
-    # Note: The last 30 rows will have NaN targets. We KEEP them for the display.
-    df['Log_Return_30d'] = np.log(df['Gold']).shift(-30) - np.log(df['Gold'])
+    # Target: 30-Day Future Return
+    # We KEEP the last 30 days (NaN targets) so we can display today's price
+    df['Log_Return_30d'] = np.log(df['Gold_GBP']).shift(-30) - np.log(df['Gold_GBP'])
     
-    return df  # <--- FIX: We return the full dataframe (including today's rows)
+    return df 
 
-# --- 3. MODEL TRAINING (Fixed: Filter NaNs internally) ---
+# --- 3. MODEL TRAINING ---
 @st.cache_resource
 def train_model(data):
-    features = ['RSI', 'SMA_50', 'SMA_200', 'Rolling_Std', 'Corr_USD', 'Corr_Yield', 'USD_Index', '10Y_Treasury']
+    features = ['RSI', 'SMA_50', 'SMA_200', 'Rolling_Std', 'Corr_GBP', 'GBP_USD', '10Y_Treasury']
     target = 'Log_Return_30d'
     
-    # Separate Training Data: Drop rows where we don't know the future yet
+    # Filter NaNs ONLY for training the AI
     train_df = data.dropna(subset=[target, *features])
     
     X = train_df[features]
@@ -88,95 +104,96 @@ def train_model(data):
     
     return model, features
 
-# --- MAIN APP LOGIC ---
-st.title("🏆 Retail Procurement Dashboard: Gold (XAU)")
-st.markdown("### Strategic Inventory Planning | 30-Day Horizon")
+# --- MAIN DASHBOARD UI ---
+st.title("🇬🇧 UK Jewellers Procurement Dashboard")
+st.markdown("### Inventory Intelligence (XAU/GBP) | 30-Day Outlook")
+
+# Display current fetch time
+st.caption(f"Last Live Data Fetch: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')} (London Time)")
 
 # Load & Process
-with st.spinner('Fetching live market data...'):
+with st.spinner('Calibrating to Sterling markets...'):
     df_raw = load_data()
-    df = add_features(df_raw) 
-    
-    # Train model (it will filter NaNs internally)
+    df = add_features(df_raw)
     model, feature_list = train_model(df)
 
-# Prediction Logic: Use the ACTUAL last row (Today)
-# Even though 'Log_Return_30d' is NaN for this row, the FEATURES (Price, RSI) are valid.
+# Prediction Logic (Using TODAY's data)
 last_row = df.iloc[-1]
-current_price = last_row['Gold']
+current_price_gbp = last_row['Gold_GBP']
 current_date = df.index[-1]
 
-# Predict future return based on today's features
 latest_features = df[feature_list].iloc[[-1]]
 pred_log_return = model.predict(latest_features)[0]
 
-# Calculate Prices
-predicted_price = current_price * np.exp(pred_log_return)
-pct_change = (predicted_price - current_price) / current_price
+# Calculate Forecast
+predicted_price_gbp = current_price_gbp * np.exp(pred_log_return)
+pct_change = (predicted_price_gbp - current_price_gbp) / current_price_gbp
 
-# Define Signal
+# Decision Engine
 if pct_change > 0.02:
-    signal = "AGGRESSIVE BUY"
+    signal = "STOCK UP"
     signal_color = "green"
-    advice = "Price surging. Maximize inventory."
+    advice = "Sterling price set to rise. Buy ahead of inflation."
 elif pct_change < -0.02:
-    signal = "WAIT / LIQUIDATE"
+    signal = "WAIT / HOLD CASH"
     signal_color = "red"
-    advice = "Price softening. Delay procurement."
+    advice = "Price softening in GBP terms. Delay orders."
 else:
-    signal = "HOLD"
+    signal = "MAINTAIN STOCK"
     signal_color = "gray"
-    advice = "Market flat. Maintain standard stock."
+    advice = "Market rangebound. Buy only for immediate sales."
 
-# --- TOP KPI ROW ---
+# --- METRICS ROW ---
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Current Price", f"${current_price:,.2f}", f"{current_date.strftime('%Y-%m-%d')}")
-col2.metric("Predicted (30 Days)", f"${predicted_price:,.2f}", f"{pct_change:.2%}")
-col3.markdown(f"**Signal:**")
+col1.metric("Gold Spot (£/oz)", f"£{current_price_gbp:,.2f}", f"{current_date.strftime('%d-%b-%Y')}")
+col2.metric("30-Day Forecast", f"£{predicted_price_gbp:,.2f}", f"{pct_change:.2%}")
+col3.markdown(f"**Action Signal:**")
 col3.markdown(f":{signal_color}[**{signal}**]")
-col4.markdown(f"**Advice:**\n{advice}")
+col4.markdown(f"**Guidance:**\n{advice}")
 
 st.divider()
 
-# --- CHARTING SECTION ---
-tab1, tab2 = st.tabs(["Price Forecast", "Macro Drivers"])
+# --- INTERACTIVE CHARTS ---
+tab1, tab2 = st.tabs(["GBP Price Trend", "Currency Impact"])
 
 with tab1:
-    st.subheader("Price Trend Analysis")
+    st.subheader("Gold Price in Sterling (£)")
     fig = go.Figure()
     
-    # Plot last 1 year of actual data
+    # Plot last 1 year of Actual History
     subset = df.tail(365)
-    fig.add_trace(go.Scatter(x=subset.index, y=subset['Gold'], mode='lines', name='Actual Price', line=dict(color='black')))
+    fig.add_trace(go.Scatter(
+        x=subset.index, y=subset['Gold_GBP'], 
+        mode='lines', name='Actual (£)', 
+        line=dict(color='#00247D') # UK Blue
+    ))
     
-    # Plot Projection Line
+    # Plot Projection
     future_date = current_date + timedelta(days=30)
     fig.add_trace(go.Scatter(
         x=[current_date, future_date], 
-        y=[current_price, predicted_price],
-        mode='lines+markers', name='AI Prediction',
+        y=[current_price_gbp, predicted_price_gbp],
+        mode='lines+markers', name='AI Forecast',
         line=dict(color=signal_color, width=4, dash='dash')
     ))
     
-    fig.update_layout(height=400, template="simple_white", hovermode="x unified")
+    fig.update_layout(height=400, template="simple_white", hovermode="x unified", yaxis_tickprefix="£")
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.subheader("What is driving this prediction?")
+    st.subheader("What drives the UK price?")
     importance = pd.DataFrame({'Feature': feature_list, 'Importance': model.feature_importances_})
     importance = importance.sort_values(by='Importance', ascending=True)
     
     fig_imp = go.Figure(go.Bar(
         x=importance['Importance'], y=importance['Feature'], orientation='h',
-        marker=dict(color='orange')
+        marker=dict(color='#CF142B') # UK Red
     ))
-    fig_imp.update_layout(height=400, title="Model Feature Importance", template="simple_white")
+    fig_imp.update_layout(height=400, title="Model Drivers", template="simple_white")
     st.plotly_chart(fig_imp, use_container_width=True)
-
-    st.info(f"Current Gold/USD Correlation (60d rolling): **{last_row['Corr_USD']:.2f}**")
-
-# --- SIDEBAR: SIMULATION ---
-st.sidebar.header("Scenario Planning")
-st.sidebar.write("Adjust market conditions to see impact:")
-shock_usd = st.sidebar.slider("Shock: USD Index Change", -5.0, 5.0, 0.0)
-st.sidebar.markdown(f"*Impact on Model:* Simulating a **{shock_usd}%** shift in dollar strength.")
+    
+    # Currency Insight Box
+    gbp_rate = last_row['GBP_USD']
+    st.info(f"💷 **Currency Check:** £1 = ${gbp_rate:.3f}. \n\n"
+            f"If the Pound drops below ${gbp_rate*0.95:.3f}, Gold prices in UK will rise "
+            f"even if the Global Price stays flat.")
