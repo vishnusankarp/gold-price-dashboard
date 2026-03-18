@@ -29,14 +29,10 @@ def load_data():
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
     
     # Download data
-    raw_data = yf.download(list(tickers.values()), start=start_date, progress=False)
+    raw_data = yf.download(list(tickers.values()), start=start_date, progress=False, multi_level_index=False)
     
     # Flatten MultiIndex (Fix for yfinance structure)
-    if isinstance(raw_data.columns, pd.MultiIndex):
-        try:
-            raw_data = raw_data.xs('Adj Close', axis=1, level=0, drop_level=True)
-        except KeyError:
-            raw_data = raw_data.xs('Close', axis=1, level=0, drop_level=True)
+    
 
     # Rename columns
     symbol_to_name = {v: k for k, v in tickers.items()}
