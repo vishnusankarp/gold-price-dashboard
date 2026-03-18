@@ -15,39 +15,60 @@ st.set_page_config(
 
 # --- 1. DATA INGESTION (Auto-Updates Every 2 Hours) ---
 # ttl="2h" forces the app to re-download data if the cache is older than 2 hours
+# --- 1. DATA INGESTION (Bulletproof Loop Method) ---
 @st.cache_data(ttl="2h")
 def load_data():
     tickers = {
-        'Gold_USD': 'GC=F',       # Gold Futures (Global Standard)
-        'GBP_USD': 'GBPUSD=X',    # Exchange Rate (£1 = $x)
-        'USD_Index': 'DX-Y.NYB',  # Strength of Dollar
-        '10Y_Treasury': '^TNX',   # Opportunity Cost
-        'VIX': '^VIX'             # Market Fear
+        'Gold_USD': 'GC=F',       
+        'GBP_USD': 'GBPUSD=X',    
+        'USD_Index': 'DX-Y.NYB',  
+        '10Y_Treasury': '^TNX',   
+        'VIX': '^VIX'             
     }
     
-    # Fetch 5 years of data
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
+    df_list = []
     
-    # Download data
-    raw_data = yf.download(list(tickers.values()), start=start_date, progress=False, multi_level_index=False)
-    
-    # Flatten MultiIndex (Fix for yfinance structure)
-    
+    # 1. Download one by one to avoid MultiIndex completely
+    for name, ticker in tickers.items():
+        try:
+            # Download individual ticker
+            data = yf.download(ticker, start=start_date, progress=False)
+            
+            if not data.empty:
+                # Extract just the Close price, no matter how yfinance formats it
+                if 'Close' in data.columns:
+                    series = data['Close']
+                elif 'Adj Close' in data.columns:
+                    series = data['Adj Close']
+                else:
+                    series = data.iloc[:, 0] # Ultimate fallback
+                
+                # If yfinance still forces a DataFrame, squeeze it to a Series
+                if isinstance(series, pd.DataFrame):
+                    series = series.iloc[:, 0]
+                
+                series.name = name
+                df_list.append(series)
+        except Exception:
+            continue # If one fails, keep trying the others
 
-    # Rename columns
-    symbol_to_name = {v: k for k, v in tickers.items()}
-    df = raw_data.rename(columns=symbol_to_name)
+    # 2. Glue them together
+    if not df_list:
+        st.error("⚠️ Complete API Failure: Yahoo Finance is blocking the server IP.")
+        st.stop()
+        
+    df = pd.concat(df_list, axis=1)
     
     # Validation Check
     if 'Gold_USD' not in df.columns or 'GBP_USD' not in df.columns:
-        st.error("⚠️ Data Error: Yahoo Finance could not retrieve Gold or Currency data.")
+        st.error(f"⚠️ Data Error: Yahoo Finance could not retrieve Gold or Currency data. Columns found: {list(df.columns)}")
         st.stop()
 
-    # Clean data (Forward fill helps with holidays)
-    df = df.fillna(method='ffill').dropna()
+    # Clean data 
+    df = df.ffill().dropna()
     
     # --- 🇬🇧 CRITICAL CALCULATION ---
-    # Convert Global Gold Price ($) to UK Price (£)
     df['Gold_GBP'] = df['Gold_USD'] / df['GBP_USD']
     
     if '10Y_Treasury' in df.columns:
