@@ -26,7 +26,6 @@ def load_data():
     start_date = (pd.Timestamp.now() - pd.DateOffset(years=5)).strftime('%Y-%m-%d')
     df_list = []
     
-    # Download one by one to avoid MultiIndex issues
     for name, ticker in tickers.items():
         try:
             data = yf.download(ticker, start=start_date, progress=False)
@@ -101,10 +100,10 @@ def train_model(data):
     return model, features
 
 # --- MAIN DASHBOARD UI ---
-st.title("Gold Procurement Dashboard (USD)")
+st.title("🏆 Gold Procurement Dashboard (USD)")
 st.markdown("### Inventory Intelligence (XAU/USD) | 30-Day Outlook")
 
-st.caption(f"Last Live Data Fetch: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')} (New York Time)")
+st.caption(f"Last Live Data Fetch: {datetime.now().strftime('%d-%b-%Y %H:%M:%S')} (IST)")
 
 with st.spinner('Fetching market data...'):
     df_raw = load_data()
@@ -122,19 +121,27 @@ pred_log_return = model.predict(latest_features)[0]
 predicted_price_usd = current_price_usd * np.exp(pred_log_return)
 pct_change = (predicted_price_usd - current_price_usd) / current_price_usd
 
-# Decision Engine
-if pct_change > 0.02:
+# --- RISK-ADJUSTED DECISION ENGINE (Accounting for ~4.2% MAPE) ---
+if pct_change > 0.05:
     signal = "AGGRESSIVE BUY"
     signal_color = "green"
-    advice = "Price expected to rise. Secure inventory early."
-elif pct_change < -0.02:
-    signal = "WAIT / LIQUIDATE"
+    advice = "High confidence uptrend (>5%). Secure major inventory now."
+elif pct_change > 0.02:
+    signal = "ACCUMULATE"
+    signal_color = "#2E8B57" # SeaGreen
+    advice = "Moderate uptrend predicted. Buy incrementally to average costs."
+elif pct_change < -0.05:
+    signal = "LIQUIDATE / HALT"
     signal_color = "red"
-    advice = "Price softening. Delay procurement."
+    advice = "Major price drop expected. Halt procurement entirely."
+elif pct_change < -0.02:
+    signal = "DELAY PROCUREMENT"
+    signal_color = "#CD5C5C" # IndianRed
+    advice = "Price softening. Delay orders to capture cheaper rates next week."
 else:
-    signal = "HOLD"
+    signal = "HOLD / NEUTRAL"
     signal_color = "gray"
-    advice = "Market stable. Maintain standard stock."
+    advice = "Predicted move is within the model's error margin (~4%). Maintain standard stock."
 
 # --- METRICS ROW ---
 col1, col2, col3, col4 = st.columns(4)
@@ -173,14 +180,27 @@ with tab1:
 
 with tab2:
     st.subheader("What drives the USD price?")
-    importance = pd.DataFrame({'Feature': feature_list, 'Importance': model.feature_importances_})
+    
+    # 1. Translate technical columns into business readable names
+    feature_mapping = {
+        'RSI': 'Relative Strength Index (Momentum)',
+        'SMA_50': '50-Day Short-Term Trend',
+        'SMA_200': '200-Day Macro Trend',
+        'Rolling_Std': '30-Day Market Volatility',
+        'Corr_USD': 'Correlation to US Dollar (DXY)',
+        'USD_Index': 'US Dollar Strength (DXY)',
+        '10Y_Treasury': 'US 10-Year Treasury Yields'
+    }
+    
+    importance = pd.DataFrame({'Feature_Code': feature_list, 'Importance': model.feature_importances_})
+    importance['Readable_Name'] = importance['Feature_Code'].map(feature_mapping)
     importance = importance.sort_values(by='Importance', ascending=True)
     
     fig_imp = go.Figure(go.Bar(
-        x=importance['Importance'], y=importance['Feature'], orientation='h',
+        x=importance['Importance'], y=importance['Readable_Name'], orientation='h',
         marker=dict(color='orange')
     ))
-    fig_imp.update_layout(height=400, title="Model Drivers", template="simple_white")
+    fig_imp.update_layout(height=400, title="Algorithm Feature Weighting", template="simple_white")
     st.plotly_chart(fig_imp, use_container_width=True)
     
     st.info(f"📊 Current Gold/USD Correlation (60d rolling): **{last_row['Corr_USD']:.2f}**")
